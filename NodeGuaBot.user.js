@@ -255,7 +255,7 @@
       }
 
       const status = resp.status || 0;
-      const retryable = status === 429 || status === 502 || status === 503 || status === 504;
+      const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
       if (!retryable || attempt >= maxRetries) {
         if (status === 429) {
           throw new Error(`抓取失败：HTTP 429（站点限流${attempt ? `；已重试 ${attempt} 次` : ''}）。建议缩小页码范围或稍后重试。`);
@@ -537,7 +537,12 @@
         return;
       }
       const delta = json?.choices?.[0]?.delta;
-      const content = delta?.content ?? delta?.text;
+      const content =
+        typeof delta?.content === 'string' && delta.content.length > 0
+          ? delta.content
+          : typeof delta?.text === 'string'
+            ? delta.text
+            : undefined;
       if (typeof content === 'string' && content) {
         sawAnyText = true;
         onText(content);
@@ -1558,6 +1563,7 @@
         const errText = String(msg || '未知错误');
         if (usedImages && cfg.sendImages && !sawOutput && (looksLikeImageNotSupported(errText) || looksLikeImageFetchFailed(errText))) {
           ui.status.textContent = '检测到图片多模态失败（可能网关不支持或图床被限流/拒绝访问），已降级为仅发送图片链接文本，重试中…';
+          if (abort) abort();
           startRequest(false);
           return;
         }
@@ -1776,7 +1782,7 @@
         ui.chatStatus.textContent = '失败。';
         setDetails(ui.chatErrorBox, ui.chatError, e?.message || String(e));
         setBusy(ui, false);
-        state.chat.history.splice(assistantIndex); // rollback assistant placeholder
+        state.chat.history.splice(Math.max(0, assistantIndex - 1)); // rollback user + assistant placeholder
         return;
       }
 
@@ -1823,7 +1829,7 @@
           setDetails(ui.chatErrorBox, ui.chatError, errText);
           setBusy(ui, false);
           if (abort) abort();
-          state.chat.history.splice(assistantIndex); // rollback assistant placeholder
+          state.chat.history.splice(Math.max(0, assistantIndex - 1)); // rollback user + assistant placeholder
         },
         onDone: () => {
           if (finished) return;
