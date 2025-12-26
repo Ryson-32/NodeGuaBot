@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         NodeGuaBot（NodeSeek AI吃瓜助手）
-// @namespace    https://github.com/NodeSeekDev/NodeGuaBot
+// @namespace    https://github.com/Ryson-32/NodeGuaBot
 // @version      0.3.9
 // @description  NodeSeek论坛一键吃瓜：自动抓取楼层并生成时间线/争议点/立场对照，总结后可继续追问对话
 // @match        https://www.nodeseek.com/post-*
