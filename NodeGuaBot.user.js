@@ -203,7 +203,7 @@
   }
 
   function parseThreadLocation(loc) {
-    const m = (loc?.pathname || '').match(/^\/post-(\d+)-(\d+)$/);
+    const m = (loc?.pathname || '').match(/^\/post-(\d+)-(\d+)\/?$/);
     if (!m) return null;
     return { postId: m[1], page: Number.parseInt(m[2], 10) };
   }
@@ -815,14 +815,16 @@
       return `data:${contentType};base64,${base64}`;
     }
 
-    // Some hosts (e.g. imgur.com/<id>) return HTML page; try og:image then refetch.
+    // Some hosts (e.g. imgur.com/<id>) return HTML page; parse meta og:image then refetch.
     if (contentType.includes('text/html')) {
       const html = new TextDecoder('utf-8').decode(new Uint8Array(buffer));
-      const m =
-        html.match(/property=["']og:image["']\s+content=["']([^"']+)["']/i) ||
-        html.match(/name=["']twitter:image["']\s+content=["']([^"']+)["']/i);
-      const nextUrl = m?.[1]?.trim();
-      if (nextUrl) return fetchImageAsDataUrl(nextUrl, depth + 1);
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const meta =
+        doc.querySelector('meta[property="og:image"][content]') ||
+        doc.querySelector('meta[property="og:image:secure_url"][content]') ||
+        doc.querySelector('meta[name="twitter:image"][content]');
+      const nextUrl = meta?.getAttribute('content')?.trim();
+      if (nextUrl) return fetchImageAsDataUrl(toAbsUrl(nextUrl, raw), depth + 1);
     }
 
     throw new Error(`不支持的图片响应类型：${contentType || '(unknown)'}`);
@@ -1600,7 +1602,6 @@
 
     const question = ui.chatInput.value.trim();
     if (!question) return;
-    ui.chatInput.value = '';
 
     const cfg = loadConfig();
     cfg.apiUrl = normalizeApiUrl(ui.apiUrl.value.trim());
@@ -1621,6 +1622,7 @@
     }
 
     appendChatBubble(ui, 'user', question);
+    ui.chatInput.value = '';
     const aiBubble = appendChatBubble(ui, 'ai', '');
 
     setBusy(ui, true);
@@ -1782,6 +1784,7 @@
         ui.chatStatus.textContent = '失败。';
         setDetails(ui.chatErrorBox, ui.chatError, e?.message || String(e));
         setBusy(ui, false);
+        ui.chatInput.value = question;
         state.chat.history.splice(Math.max(0, assistantIndex - 1)); // rollback user + assistant placeholder
         return;
       }
@@ -1828,6 +1831,7 @@
           ui.chatStatus.textContent = '失败。';
           setDetails(ui.chatErrorBox, ui.chatError, errText);
           setBusy(ui, false);
+          ui.chatInput.value = question;
           if (abort) abort();
           state.chat.history.splice(Math.max(0, assistantIndex - 1)); // rollback user + assistant placeholder
         },
