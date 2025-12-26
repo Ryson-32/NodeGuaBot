@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NodeGuaBot（NodeSeek AI吃瓜助手）
 // @namespace    https://github.com/Ryson-32/NodeGuaBot
-// @version      0.3.9
+// @version      0.4.0
 // @description  NodeSeek论坛一键吃瓜：自动抓取楼层并生成时间线/争议点/立场对照，总结后可继续追问对话
 // @match        https://www.nodeseek.com/post-*
 // @require      https://cdn.jsdelivr.net/npm/marked@17.0.1/lib/marked.umd.js
@@ -31,6 +31,12 @@
     maxImages: 24,
     maxChatImages: 4,
     maxImageBytes: 2_500_000,
+    fetchDelayMs: 1_200,
+    fetchDelayJitterMs: 800,
+    fetchMaxRetries: 6,
+    fetchRetryBaseMs: 1_500,
+    fetchRetryMaxMs: 20_000,
+    fetchRetryJitterMs: 800,
   };
 
   const DEFAULT_CONFIG = Object.freeze({
@@ -202,10 +208,74 @@
     return { postId: m[1], page: Number.parseInt(m[2], 10) };
   }
 
-  async function fetchHtml(url) {
-    const resp = await fetch(url, { credentials: 'include' });
-    if (!resp.ok) throw new Error(`抓取失败：HTTP ${resp.status}`);
-    return resp.text();
+  function sleep(ms) {
+    const t = Number(ms);
+    return new Promise((resolve) => setTimeout(resolve, Number.isFinite(t) && t > 0 ? t : 0));
+  }
+
+  function parseRetryAfterMs(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const seconds = Number.parseInt(raw, 10);
+    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+    const dt = Date.parse(raw);
+    if (Number.isFinite(dt)) {
+      const delta = dt - Date.now();
+      if (delta > 0) return delta;
+    }
+    return null;
+  }
+
+  function calcRetryWaitMs(attempt, retryAfterMs) {
+    const fromHeader = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
+    const base = APP.fetchRetryBaseMs * 2 ** Math.max(0, attempt - 1);
+    const exp = Math.min(APP.fetchRetryMaxMs, Math.max(APP.fetchRetryBaseMs, base));
+    const jitter = Math.floor(Math.random() * APP.fetchRetryJitterMs);
+    const chosen = Math.max(fromHeader, exp + jitter);
+    return Math.min(APP.fetchRetryMaxMs, chosen);
+  }
+
+  function calcThrottleMs() {
+    const base = Number.isFinite(APP.fetchDelayMs) ? APP.fetchDelayMs : 0;
+    const jitter = Number.isFinite(APP.fetchDelayJitterMs) ? Math.max(0, APP.fetchDelayJitterMs) : 0;
+    return Math.max(0, Math.floor(base + Math.random() * jitter));
+  }
+
+  async function fetchHtml(url, opts = {}) {
+    const maxRetries = Number.isFinite(opts?.maxRetries) ? opts.maxRetries : APP.fetchMaxRetries;
+    const throttleMs = Number.isFinite(opts?.throttleMs) ? opts.throttleMs : 0;
+    const onRetry = typeof opts?.onRetry === 'function' ? opts.onRetry : null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      const resp = await fetch(url, { credentials: 'include' });
+      if (resp.ok) {
+        const html = await resp.text();
+        if (throttleMs > 0) await sleep(throttleMs);
+        return html;
+      }
+
+      const status = resp.status || 0;
+      const retryable = status === 429 || status === 502 || status === 503 || status === 504;
+      if (!retryable || attempt >= maxRetries) {
+        if (status === 429) {
+          throw new Error(`抓取失败：HTTP 429（站点限流${attempt ? `；已重试 ${attempt} 次` : ''}）。建议缩小页码范围或稍后重试。`);
+        }
+        throw new Error(`抓取失败：HTTP ${status || '??'}${attempt ? `（已重试 ${attempt} 次）` : ''}`);
+      }
+
+      const retryAfterMs = parseRetryAfterMs(resp.headers?.get?.('Retry-After'));
+      const waitMs = calcRetryWaitMs(attempt + 1, retryAfterMs);
+      if (onRetry) {
+        try {
+          onRetry({ status, attempt: attempt + 1, maxRetries, waitMs });
+        } catch {
+          // ignore
+        }
+      }
+      await sleep(waitMs);
+    }
+
+    throw new Error('抓取失败：未知错误');
   }
 
   function parseHtml(html) {
@@ -1387,7 +1457,13 @@
       for (let p = startPage; p <= endPage; p++) {
         ui.status.textContent = `正在抓取第 ${p}/${endPage} 页…`;
         const url = `${location.origin}/post-${thread.postId}-${p}`;
-        const html = await fetchHtml(url);
+        const html = await fetchHtml(url, {
+          throttleMs: calcThrottleMs(),
+          onRetry: ({ status, attempt, maxRetries, waitMs }) => {
+            const hint = status === 429 ? '站点限流' : `HTTP ${status || '??'}`;
+            ui.status.textContent = `抓取遇到${hint}，等待 ${Math.max(1, Math.ceil(waitMs / 1000))}s 后重试（${attempt}/${maxRetries}）…第 ${p}/${endPage} 页`;
+          },
+        });
         const doc = parseHtml(html);
         title = title || doc.querySelector('h1')?.textContent?.trim() || '';
 
@@ -1584,9 +1660,19 @@
           uniquePages.add(page);
         }
         try {
-          for (const p of Array.from(uniquePages).sort((a, b) => a - b).slice(0, 5)) {
+          const pagesToFetch = Array.from(uniquePages)
+            .sort((a, b) => a - b)
+            .slice(0, 5);
+          for (let i = 0; i < pagesToFetch.length; i++) {
+            const p = pagesToFetch[i];
             const url = `${location.origin}/post-${postId}-${p}`;
-            const html = await fetchHtml(url);
+            const html = await fetchHtml(url, {
+              throttleMs: calcThrottleMs(),
+              onRetry: ({ status, attempt, maxRetries, waitMs }) => {
+                const hint = status === 429 ? '站点限流' : `HTTP ${status || '??'}`;
+                ui.chatStatus.textContent = `抓取图片页遇到${hint}，等待 ${Math.max(1, Math.ceil(waitMs / 1000))}s 后重试（${attempt}/${maxRetries}）…（第 ${i + 1}/${pagesToFetch.length} 页）`;
+              },
+            });
             const doc = parseHtml(html);
             for (const f of floors) {
               const el = doc.querySelector(`#nsk-body-left .content-item[id="${String(f)}"]`);
